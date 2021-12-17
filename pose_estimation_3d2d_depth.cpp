@@ -22,6 +22,8 @@ using namespace cv;
 
 bool readYaml( Mat& cameraMatrix, Mat& distCoeffs );
 
+Eigen::Quaterniond Rotation2quaternion( const Mat& R );
+
 void find_feature_matches (
     const Mat& img_1, const Mat& img_2,
     std::vector<KeyPoint>& keypoints_1,
@@ -61,21 +63,25 @@ int main ( int argc, char** argv )
     ifstream fin ( associate_file );
 
     string rgb_file, depth_file, time_rgb, time_depth;
-    cv::Mat color_prev, color_curr, color_undist, depth_prev, depth_curr;
-    /* Camera Intrinsic 
-    float cx = 325.5;
-    float cy = 253.5;
-    float fx = 518.0;
-    float fy = 519.0;
-    float depth_scale = 5000.0;
-    */
+    Mat color_prev, color_curr, color_undist, depth_prev, depth_curr;
+
     vector<KeyPoint> keypoints_1, keypoints_2;
     vector<DMatch> matches;
-    Mat r;
-    Mat t = ( Mat_<double> ( 3,1 ) << 0, 0, 0 );
-    Mat R = ( Mat_<double> ( 3,3 ) << 1.0, 0, 0, 0, 1.0, 0, 0, 0, 1.0 );
 
+    // 0.4183 -0.4920 1.6849 -0.8156 0.0346 -0.0049 0.5775 (tx,ty,tz,qx,qy,qz,qw)
     // initialization of translation and rotation
+    Eigen::Quaterniond q_eigen(0.5775, -0.8156, 0.0346, -0.0049 );
+    Eigen::Matrix3d R_eigen = q_eigen.toRotationMatrix();
+    Mat r;
+    Mat t = ( Mat_<double> ( 3,1 ) << 0.4183, -0.4920, 1.6849 );
+    Mat R = ( Mat_<double> ( 3,3 ) << R_eigen(0,0), R_eigen(0,1), R_eigen(0,2),
+                                      R_eigen(1,0), R_eigen(1,1), R_eigen(1,2),
+                                      R_eigen(2,0), R_eigen(2,1), R_eigen(2,2) );
+    cout << "Initial pose:\n";
+    cout << "R = \n" << R << endl;
+    cout << "t = \n" << t << endl;
+    q_eigen = Rotation2quaternion( R );
+    cout << "q = \n" << q_eigen.vec().transpose() << " " << q_eigen.w() << endl; 
 
 
 
@@ -97,9 +103,7 @@ int main ( int argc, char** argv )
         find_feature_matches ( color_prev, color_curr, keypoints_1, keypoints_2, matches );
         cout << "There are total: " << matches.size() << "sets of pairs" << endl;
         cout << keypoints_1.size()  << endl;
-        // 建立3D点
-        //Mat d1 = imread ( argv[3], CV_LOAD_IMAGE_UNCHANGED );       // 深度图为16位无符号数，单通道图像
-        //Mat K = ( Mat_<double> ( 3,3 ) << 520.9, 0, 325.1, 0, 521.0, 249.7, 0, 0, 1 );
+
         vector<Point3f> pts_3d;
         vector<Point2f> pts_2d;
         
@@ -112,6 +116,8 @@ int main ( int argc, char** argv )
             float dd = d/5000.0;
             Point2d p1 = pixel2cam ( keypoints_1[m.queryIdx].pt, cameraMatrix );
             // transform point cloud from current frame to global frame
+            // from x2 = R*x1+t
+            // x1 = R(Transpose)*(x2-t), x1 are the pointcloud in frame 1; x2 are pointcloud in frame 2
             Mat pts_3d_tran = ( Mat_<double>(3,1) << p1.x*dd-t.at<double>(0,0), p1.y*dd-t.at<double>(1,0), dd-t.at<double>(2,0) );
             //cout << "pts_3d_tran = " << pts_3d_tran << endl;
             pts_3d_tran = R.t()*pts_3d_tran;
@@ -127,15 +133,15 @@ int main ( int argc, char** argv )
         solvePnPRansac( pts_3d, pts_2d, cameraMatrix, Mat(), r, t, false );
         
         cv::Rodrigues ( r, R ); // Rodrigues to rotation matrix
+        
+        //cout<<"calling bundle adjustment"<<endl;
+        //bundleAdjustment ( pts_3d, pts_2d, cameraMatrix, R, t );            
 
         cout << "R = " << endl << R << endl;
-        cout << "R transpose = " << R.t() << endl;
+        //cout << "R transpose = " << R.t() << endl;
         cout << "t=" << endl << t << endl;
-
-        cout<<"calling bundle adjustment"<<endl;
-
-        bundleAdjustment ( pts_3d, pts_2d, cameraMatrix, R, t );            
-
+        q_eigen = Rotation2quaternion( R );
+        cout << "q = \n" << q_eigen.vec().transpose() << " " << q_eigen.w() << endl; 
 
         // swap state
         color_prev = color_curr.clone();
@@ -145,10 +151,22 @@ int main ( int argc, char** argv )
         keypoints_2.clear();
         matches.clear(); 
     }
-
-
-    
+   
 }
+
+
+
+Eigen::Quaterniond Rotation2quaternion( const Mat& R ){
+    Eigen::Matrix3d R_eigen;
+    R_eigen << R.at<double>(0,0), R.at<double>(0,1), R.at<double>(0,2),
+               R.at<double>(1,0), R.at<double>(1,1), R.at<double>(1,2),
+               R.at<double>(2,0), R.at<double>(2,1), R.at<double>(2,2);
+
+    Eigen::Quaterniond q = Eigen::Quaterniond( R_eigen );
+
+    return q;
+}
+
 
 void find_feature_matches ( const Mat& img_1, const Mat& img_2,
                             std::vector<KeyPoint>& keypoints_1,
@@ -158,8 +176,9 @@ void find_feature_matches ( const Mat& img_1, const Mat& img_2,
     //-- 初始化
     Mat descriptors_1, descriptors_2;
     // used in OpenCV3
-    Ptr<FeatureDetector> detector = ORB::create();
-    Ptr<DescriptorExtractor> descriptor = ORB::create();
+    // setting number of points to be searched
+    Ptr<FeatureDetector> detector = ORB::create(500);
+    Ptr<DescriptorExtractor> descriptor = ORB::create(500);
     // use this if you are in OpenCV2
     // Ptr<FeatureDetector> detector = FeatureDetector::create ( "ORB" );
     // Ptr<DescriptorExtractor> descriptor = DescriptorExtractor::create ( "ORB" );
@@ -194,7 +213,7 @@ void find_feature_matches ( const Mat& img_1, const Mat& img_2,
     //当描述子之间的距离大于两倍的最小距离时,即认为匹配有误.但有时候最小距离会非常小,设置一个经验值30作为下限.
     for ( int i = 0; i < descriptors_1.rows; i++ )
     {
-        if ( match[i].distance <= max ( 2*min_dist, 25.0 ) )
+        if ( match[i].distance <= max ( 2*min_dist, 20.0 ) )
         {
             matches.push_back ( match[i] );
         }
@@ -253,10 +272,9 @@ void bundleAdjustment (
     // vertex
     g2o::VertexSE3Expmap* pose = new g2o::VertexSE3Expmap(); // camera pose
     Eigen::Matrix3d R_mat;
-    R_mat <<
-          R.at<double> ( 0,0 ), R.at<double> ( 0,1 ), R.at<double> ( 0,2 ),
-               R.at<double> ( 1,0 ), R.at<double> ( 1,1 ), R.at<double> ( 1,2 ),
-               R.at<double> ( 2,0 ), R.at<double> ( 2,1 ), R.at<double> ( 2,2 );
+    R_mat <<  R.at<double> ( 0,0 ), R.at<double> ( 0,1 ), R.at<double> ( 0,2 ),
+              R.at<double> ( 1,0 ), R.at<double> ( 1,1 ), R.at<double> ( 1,2 ),
+              R.at<double> ( 2,0 ), R.at<double> ( 2,1 ), R.at<double> ( 2,2 );
     pose->setId ( 0 );
     pose->setEstimate ( g2o::SE3Quat (
                             R_mat,
@@ -297,7 +315,8 @@ void bundleAdjustment (
     }
 
     chrono::steady_clock::time_point t1 = chrono::steady_clock::now();
-    optimizer.setVerbose ( true );
+    //optimizer.setVerbose ( true );
+    optimizer.setVerbose ( false );
     optimizer.initializeOptimization();
     optimizer.optimize ( 100 );
     chrono::steady_clock::time_point t2 = chrono::steady_clock::now();
