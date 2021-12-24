@@ -23,14 +23,25 @@ bool readYaml( Mat& cameraMatrix, Mat& distCoeffs );
 
 Eigen::Quaterniond Rotation2quaternion( const Mat& R );
 
-void find_feature_matches (
+void find_feature_matches(
     const Mat& img_1, const Mat& img_2,
-    std::vector<KeyPoint>& keypoints_1,
-    std::vector<KeyPoint>& keypoints_2,
-    std::vector< DMatch >& matches );
+    vector<KeyPoint>& keypoints_1,
+    vector<KeyPoint>& keypoints_2,
+    vector< DMatch >& matches,
+    Mat& descriptors_1,
+    Mat& descriptors_2   );
 
 // 像素坐标转相机归一化坐标
-Point2d pixel2cam ( const Point2d& p, const Mat& K );
+Point2d pixel2cam( const Point2d& p, const Mat& K );
+
+void initialization_Rt( vector<KeyPoint> keypoints_1,
+                        vector<KeyPoint> keypoints_2,
+                        const Mat& depth_1,
+                        vector<Eigen::Quaterniond>& qua_global,
+                        vector<Eigen::Vector3d>& tran_global,
+                        vector<DMatch>& matches,
+                        vector< vector<Point3d> >& pointcloud_all,
+                        Mat& cameraMatrix  );
 
 void bundle_adjustment( Mat& r, Mat& t, std::vector<Point2d>& pts_2d, std::vector<Point3d>& pts_3d );
 
@@ -88,109 +99,102 @@ int main ( int argc, char** argv )
     string path_to_dataset = argv[1];
     string associate_file = path_to_dataset + "/associate_rgb_depth.txt";
 
-    ifstream fin ( associate_file );
-
-    string rgb_file, depth_file, time_rgb, time_depth;
-    Mat color_prev, color_curr, color_undist, depth_prev, depth_curr;
-
-    vector<KeyPoint> keypoints_1, keypoints_2;
-    vector<DMatch> matches;
-    // store global translation and rotation array
-    vector<Eigen::Quaterniond> quaternion_global;
-    vector<Eigen::Vector3d> translation_global;
-
-
     // 0.4183 -0.4920 1.6849 -0.8156 0.0346 -0.0049 0.5775 (tx,ty,tz,qx,qy,qz,qw)
     // initialization of translation and rotation from groundtruth.txt
     Eigen::Quaterniond q_eigen( 0.5775, -0.8156, 0.0346, -0.0049 );
     Eigen::Matrix3d R_eigen = q_eigen.toRotationMatrix();
+    // store global translation and rotation array
+    vector<Eigen::Quaterniond> quaternion_global;
+    vector<Eigen::Vector3d> translation_global;
+
     quaternion_global.push_back(q_eigen);
     Mat r;
     Mat t = ( Mat_<double> ( 3,1 ) << 0.4183, -0.4920, 1.6849 );
     Mat R = ( Mat_<double> ( 3,3 ) << R_eigen(0,0), R_eigen(0,1), R_eigen(0,2),
                                       R_eigen(1,0), R_eigen(1,1), R_eigen(1,2),
                                       R_eigen(2,0), R_eigen(2,1), R_eigen(2,2) );
+
     Eigen::Vector3d t_eigen;
     t_eigen << t.at<double>(0,0), t.at<double>(1,0), t.at<double>(2,0);
     translation_global.push_back(t_eigen);
-    cout << "Initial pose:\n";
+    cout << "Initial pose of the first image:\n";
     cout << "R = \n" << R << endl;
     cout << "t = \n" << t << endl;
     q_eigen = Rotation2quaternion( R );
     cout << "q = \n" << q_eigen.vec().transpose() << " " << q_eigen.w() << endl; 
 
+    ifstream fin ( associate_file );
 
-    for(int k=0; k<100; k++){
+    string rgb_file, depth_file, time_rgb, time_depth;
+    Mat color_prev, color_curr, color_undist, depth_prev, depth_curr;
+
+    vector<KeyPoint> keypoints_1, keypoints_2;
+    Mat descriptors_1, descriptors_2;
+    vector<DMatch> matches;
+    vector< vector<DMatch> > matches_all;
+    vector< Mat > descriptors_all;
+    vector< vector<Point3d> > pointcloud_all;
+    vector< vector<KeyPoint> > keypoints_all;
+
+    // read first image
+    fin >> time_rgb >> rgb_file >> time_depth >> depth_file;
+    color_prev = cv::imread ( path_to_dataset+"/"+rgb_file, CV_LOAD_IMAGE_COLOR);
+    undistort( color_prev, color_undist, cameraMatrix, distCoeffs, getOptimalNewCameraMatrix(cameraMatrix, distCoeffs, color_prev.size(), 0, color_prev.size() ) );
+    color_prev = color_undist.clone();
+    depth_prev = cv::imread ( path_to_dataset+"/"+depth_file, -1 );
+    // read second image
+    fin >> time_rgb >> rgb_file >> time_depth >> depth_file;
+    color_curr = cv::imread ( path_to_dataset+"/"+rgb_file, CV_LOAD_IMAGE_COLOR);
+    undistort( color_curr, color_undist, cameraMatrix, distCoeffs, getOptimalNewCameraMatrix(cameraMatrix, distCoeffs, color_curr.size(), 0, color_curr.size() ) );
+    color_curr = color_undist.clone();
+    depth_curr = cv::imread ( path_to_dataset+"/"+depth_file, -1 );
+
+    find_feature_matches ( color_prev, color_curr, keypoints_1, keypoints_2, matches, descriptors_1, descriptors_2 );
+    matches_all.push_back(matches);
+    descriptors_all.push_back(descriptors_2);
+    keypoints_all.push_back(keypoints_1);
+    keypoints_all.push_back(keypoints_2);
+    initialization_Rt( keypoints_1, keypoints_2, depth_prev, quaternion_global, translation_global, matches, pointcloud_all, cameraMatrix );
+    // swap state
+    color_prev = color_curr.clone();
+    depth_prev = depth_curr.clone();
+
+
+    int k = 0; // image match index
+
+    while( !fin.eof() ){
+
+        // for debug
+        if(k == 0)
+            break;
         cout << "*********** loop " << k << " ************" << endl << endl;
         fin >> time_rgb >> rgb_file >> time_depth >> depth_file;
-        if(k == 0){
-            color_prev = cv::imread ( path_to_dataset+"/"+rgb_file, CV_LOAD_IMAGE_COLOR);
-            undistort( color_prev, color_undist, cameraMatrix, distCoeffs, getOptimalNewCameraMatrix(cameraMatrix, distCoeffs, color_prev.size(), 0, color_prev.size() ) );
-            color_prev = color_undist.clone();
-            depth_prev = cv::imread ( path_to_dataset+"/"+depth_file, -1 );
-            continue;
-        }    
-        color_curr = cv::imread ( path_to_dataset+"/"+rgb_file, CV_LOAD_IMAGE_COLOR);
-        undistort( color_curr, color_undist, cameraMatrix, distCoeffs, getOptimalNewCameraMatrix(cameraMatrix, distCoeffs, color_curr.size(), 0, color_curr.size() ) );
-        color_curr = color_undist.clone();
-        depth_curr = cv::imread ( path_to_dataset+"/"+depth_file, -1 );
+   
 
-        find_feature_matches ( color_prev, color_curr, keypoints_1, keypoints_2, matches );
-        cout << "There are total: " << matches.size() << "sets of pairs" << endl;
+        if( !fin.fail() ){
+            color_curr = cv::imread ( path_to_dataset+"/"+rgb_file, CV_LOAD_IMAGE_COLOR);
+            undistort( color_curr, color_undist, cameraMatrix, distCoeffs, getOptimalNewCameraMatrix(cameraMatrix, distCoeffs, color_curr.size(), 0, color_curr.size() ) );
+            color_curr = color_undist.clone();
+            depth_curr = cv::imread ( path_to_dataset+"/"+depth_file, -1 );
+            find_feature_matches ( color_prev, color_curr, keypoints_1, keypoints_2, matches, descriptors_1, descriptors_2 );
+            cout << "There are total: " << matches.size() << "sets of pairs" << endl;
 
-        vector<Point3d> pts_3d;
-        vector<Point2d> pts_2d;
-        
-        for ( DMatch m:matches )
-        {
-            ushort d = depth_prev.ptr<unsigned short> (int ( keypoints_1[m.queryIdx].pt.y )) [ int ( keypoints_1[m.queryIdx].pt.x ) ];
-            if ( d == 0 )   // bad depth
-                continue;
-            double dd = d/5000.0;
-            Point2d p1 = pixel2cam ( keypoints_1[m.queryIdx].pt, cameraMatrix );
-            // transform point cloud from current frame to global frame
-            // from x2 = R*x1+t
-            // x1 = R(Transpose)*(x2-t), x1 are the pointcloud in frame 1; x2 are pointcloud in frame 2
-            Eigen::Vector3d pts_3d_proj;
-            pts_3d_proj << p1.x*dd-translation_global[k-1](0,0), 
-                           p1.y*dd-translation_global[k-1](1,0),
-                           dd-translation_global[k-1](2,0) ;
-            //cout << "pts_3d_tran = " << pts_3d_tran << endl;
-            pts_3d_proj = quaternion_global[k-1].toRotationMatrix().transpose() * pts_3d_proj;
-            //pts_3d.push_back ( Point3d ( p1.x*dd, p1.y*dd, dd ) );
-            pts_3d.push_back ( Point3d( pts_3d_proj(0,0), pts_3d_proj(1,0), pts_3d_proj(2,0) ) );
-            pts_2d.push_back ( keypoints_2[m.trainIdx].pt );
+            
+            quaternion_global.push_back(q_eigen);
+            t_eigen << t.at<double>(0,0), t.at<double>(1,0), t.at<double>(2,0);
+            translation_global.push_back(t_eigen);
+            // swap state
+            color_prev = color_curr.clone();
+            depth_prev = depth_curr.clone();
+            // reset
+            keypoints_1.clear(); 
+            keypoints_2.clear();
+            matches.clear();
+
+            k++; 
+
+
         }
-
-        //cout << "3d-2d pairs: " << pts_3d.size() << endl;
-
-        solvePnPRansac( pts_3d, pts_2d, cameraMatrix, Mat(), r, t, false ); // 调用OpenCV 的 PnP 求解，可选择EPNP，DLS等方法
-        cv::Rodrigues( r, R ); // r为旋转向量形式，用Rodrigues公式转换为矩阵
-
-        cout<< "R=\n" << R <<endl;
-        cout << "r =\n" << endl << r << endl;
-        cout << "t=\n" << endl << t << endl;
-    
-        cout<<"calling bundle adjustment"<<endl;
-        bundle_adjustment( r, t, pts_2d, pts_3d );
-        cv::Rodrigues( r, R ); // r为旋转向量形式，用Rodrigues公式转换为矩阵
-
-        cout<< "R=\n" << R <<endl;
-        cout << "r =\n" << endl << r << endl;
-        cout << "t=\n" << endl << t << endl;
-        q_eigen = Rotation2quaternion( R );
-        cout << "q = \n" << q_eigen.vec().transpose() << " " << q_eigen.w() << endl;
-        
-        quaternion_global.push_back(q_eigen);
-        t_eigen << t.at<double>(0,0), t.at<double>(1,0), t.at<double>(2,0);
-        translation_global.push_back(t_eigen);
-        // swap state
-        color_prev = color_curr.clone();
-        depth_prev = depth_curr.clone();
-        // reset
-        keypoints_1.clear(); 
-        keypoints_2.clear();
-        matches.clear(); 
 
     }
     
@@ -198,7 +202,8 @@ int main ( int argc, char** argv )
 }
 
 
-Eigen::Quaterniond Rotation2quaternion( const Mat& R ){
+Eigen::Quaterniond Rotation2quaternion( const Mat& R )
+{
     Eigen::Matrix3d R_eigen;
     R_eigen << R.at<double>(0,0), R.at<double>(0,1), R.at<double>(0,2),
                R.at<double>(1,0), R.at<double>(1,1), R.at<double>(1,2),
@@ -210,7 +215,68 @@ Eigen::Quaterniond Rotation2quaternion( const Mat& R ){
 }
 
 
-void bundle_adjustment( Mat& r, Mat& t, std::vector<Point2d>& pts_2d, std::vector<Point3d>& pts_3d ){
+void initialization_Rt( vector<KeyPoint> keypoints_1,
+                        vector<KeyPoint> keypoints_2,
+                        const Mat& depth_1,
+                        vector<Eigen::Quaterniond>& qua_global,
+                        vector<Eigen::Vector3d>& tran_global,
+                        vector<DMatch>& matches,
+                        vector< vector<Point3d> >& pointcloud_all,
+                        Mat& cameraMatrix  )
+{
+    vector<Point3d> pts_3d;
+    vector<Point2d> pts_2d;
+    Mat r ,t, R;
+    Eigen::Quaterniond q_eigen;
+    Eigen::Vector3d t_eigen;
+
+    cout << "Initialization of the rotation, translation and pointcloud for first match" << endl << endl;
+
+    for( DMatch m:matches )
+    {
+        ushort d = depth_1.ptr<unsigned short> (int ( keypoints_1[m.queryIdx].pt.y )) [ int ( keypoints_1[m.queryIdx].pt.x ) ];
+        if ( d == 0 )   // bad depth
+            continue;
+        double dd = d/5000.0;
+        Point2d p1 = pixel2cam ( keypoints_1[m.queryIdx].pt, cameraMatrix );
+        // transform point cloud from current frame to global frame
+        // from x2 = R*x1+t
+        // x1 = R(Transpose)*(x2-t), x1 are the pointcloud in frame 1; x2 are pointcloud in frame 2
+        Eigen::Vector3d pts_3d_proj;
+        pts_3d_proj << p1.x*dd-tran_global[0](0,0), 
+                        p1.y*dd-tran_global[0](1,0),
+                        dd-tran_global[0](2,0) ;
+        //cout << "pts_3d_tran = " << pts_3d_tran << endl;
+        pts_3d_proj = qua_global[0].toRotationMatrix().transpose() * pts_3d_proj;
+        //pts_3d.push_back ( Point3d ( p1.x*dd, p1.y*dd, dd ) );
+        pts_3d.push_back ( Point3d( pts_3d_proj(0,0), pts_3d_proj(1,0), pts_3d_proj(2,0) ) );
+        pts_2d.push_back ( keypoints_2[m.trainIdx].pt );
+    }
+
+    cout << "pts_3d: " << pts_3d.size() << endl;
+    cout << "pts_2d: " << pts_2d.size() << endl;
+
+    solvePnPRansac( pts_3d, pts_2d, cameraMatrix, Mat(), r, t, false ); // 调用OpenCV 的 PnP 求解，可选择EPNP，DLS等方法
+    cout << "calling bundle adjustment using Ceres Solver" << endl;
+    bundle_adjustment( r, t, pts_2d, pts_3d );
+  
+    cv::Rodrigues( r, R ); // r为旋转向量形式，用Rodrigues公式转换为矩阵
+    t_eigen << t.at<double>(0,0), t.at<double>(1,0), t.at<double>(2,0);
+
+    cout << "R=\n" << R <<endl;
+    cout << "r =\n" << endl << r << endl;
+    cout << "t=\n" << endl << t << endl;
+    q_eigen = Rotation2quaternion( R );
+    cout << "q = \n" << q_eigen.vec().transpose() << " " << q_eigen.w() << endl;
+    
+    pointcloud_all.push_back(pts_3d);
+    qua_global.push_back(q_eigen);
+    tran_global.push_back(t_eigen);
+}
+
+
+void bundle_adjustment( Mat& r, Mat& t, std::vector<Point2d>& pts_2d, std::vector<Point3d>& pts_3d )
+{
     //给rot，和tranf初值
     double cere_rot[3], cere_tran[3];
     cere_rot[0] = r.at<double>(0,0);
@@ -258,18 +324,15 @@ void bundle_adjustment( Mat& r, Mat& t, std::vector<Point2d>& pts_2d, std::vecto
 
 
 void find_feature_matches ( const Mat& img_1, const Mat& img_2,
-                            std::vector<KeyPoint>& keypoints_1,
-                            std::vector<KeyPoint>& keypoints_2,
-                            std::vector< DMatch >& matches )
+                            vector<KeyPoint>& keypoints_1,
+                            vector<KeyPoint>& keypoints_2,
+                            vector< DMatch >& matches,
+                            Mat& descriptors_1,
+                            Mat& descriptors_2 )
 {
-    //-- 初始化
-    Mat descriptors_1, descriptors_2;
-    // used in OpenCV3
-    Ptr<FeatureDetector> detector = ORB::create(1000);
-    Ptr<DescriptorExtractor> descriptor = ORB::create(1000);
-    // use this if you are in OpenCV2
-    // Ptr<FeatureDetector> detector = FeatureDetector::create ( "ORB" );
-    // Ptr<DescriptorExtractor> descriptor = DescriptorExtractor::create ( "ORB" );
+
+    Ptr<FeatureDetector> detector = ORB::create();
+    Ptr<DescriptorExtractor> descriptor = ORB::create();
     Ptr<DescriptorMatcher> matcher  = DescriptorMatcher::create ( "BruteForce-Hamming" );
     //-- 第一步:检测 Oriented FAST 角点位置
     detector->detect ( img_1,keypoints_1 );
@@ -295,15 +358,14 @@ void find_feature_matches ( const Mat& img_1, const Mat& img_2,
         if ( dist > max_dist ) max_dist = dist;
     }
 
-    //printf ( "-- Max dist : %f \n", max_dist );
-    //printf ( "-- Min dist : %f \n", min_dist );
-
     //当描述子之间的距离大于两倍的最小距离时,即认为匹配有误.但有时候最小距离会非常小,设置一个经验值30作为下限.
     for ( int i = 0; i < descriptors_1.rows; i++ )
     {
         if ( match[i].distance <= max ( 2*min_dist, 25.0 ) )
         {
             matches.push_back ( match[i] );
+            //cout << "queryIdx = " << match[i].queryIdx << endl;
+            //cout << "trainIdx = " << match[i].trainIdx << endl << endl;
         }
     }
 }
@@ -319,7 +381,8 @@ Point2d pixel2cam ( const Point2d& p, const Mat& K )
 }
 
 
-bool readYaml( Mat& cameraMatrix, Mat& distCoeffs ) {
+bool readYaml( Mat& cameraMatrix, Mat& distCoeffs )
+{
     std::string filename = "../camera_calibration_parameters.yaml";
     FileStorage fs(filename, FileStorage::READ);
     if (!fs.isOpened()) {
