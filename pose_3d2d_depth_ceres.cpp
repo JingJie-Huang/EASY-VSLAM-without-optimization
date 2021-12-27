@@ -36,12 +36,28 @@ Point2d pixel2cam( const Point2d& p, const Mat& K );
 
 void initialization_Rt( vector<KeyPoint> keypoints_1,
                         vector<KeyPoint> keypoints_2,
+                        Mat& descriptors_1,
+                        Mat& descriptors_2,
                         const Mat& depth_1,
                         vector<Eigen::Quaterniond>& qua_global,
                         vector<Eigen::Vector3d>& tran_global,
                         vector<DMatch>& matches,
                         vector< vector<Point3d> >& pointcloud_all,
                         Mat& cameraMatrix  );
+
+void match_descriptor_all_current_reconstruct(  vector< vector<Point3d> >& pointcloud_all,
+                                                vector<KeyPoint>& keypoints_1,
+                                                vector<KeyPoint>& keypoints_2,
+                                                Mat& descriptors_2,
+                                                Mat depth_curr,
+                                                vector<DMatch> matches_prev_curr,
+                                                vector<Mat>& descriptors_all,
+                                                Mat& cameraMatrix,
+                                                vector<Eigen::Quaterniond>& qua_global,
+                                                vector<Eigen::Vector3d>& tran_global  );
+
+// void find_correspond_3dpoint_2dkeypoint();
+
 
 void bundle_adjustment( Mat& r, Mat& t, std::vector<Point2d>& pts_2d, std::vector<Point3d>& pts_3d );
 
@@ -149,23 +165,29 @@ int main ( int argc, char** argv )
     color_curr = color_undist.clone();
     depth_curr = cv::imread ( path_to_dataset+"/"+depth_file, -1 );
 
-    find_feature_matches ( color_prev, color_curr, keypoints_1, keypoints_2, matches, descriptors_1, descriptors_2 );
+    find_feature_matches( color_prev, color_curr, keypoints_1, keypoints_2, matches, descriptors_1, descriptors_2 );
+    initialization_Rt( keypoints_1, keypoints_2, descriptors_1, descriptors_2, depth_prev, quaternion_global, translation_global, matches, pointcloud_all, cameraMatrix );
     matches_all.push_back(matches);
     descriptors_all.push_back(descriptors_2);
     keypoints_all.push_back(keypoints_1);
     keypoints_all.push_back(keypoints_2);
-    initialization_Rt( keypoints_1, keypoints_2, depth_prev, quaternion_global, translation_global, matches, pointcloud_all, cameraMatrix );
     // swap state
     color_prev = color_curr.clone();
     depth_prev = depth_curr.clone();
+    // reset
+    keypoints_1.clear(); 
+    keypoints_2.clear();
+    descriptors_1.release();
+    descriptors_2.release();
+    matches.clear();
 
 
-    int k = 0; // image match index
+    int k = 1; // image match index
 
     while( !fin.eof() ){
 
         // for debug
-        if(k == 0)
+        if(k == 50)
             break;
         cout << "*********** loop " << k << " ************" << endl << endl;
         fin >> time_rgb >> rgb_file >> time_depth >> depth_file;
@@ -178,6 +200,8 @@ int main ( int argc, char** argv )
             depth_curr = cv::imread ( path_to_dataset+"/"+depth_file, -1 );
             find_feature_matches ( color_prev, color_curr, keypoints_1, keypoints_2, matches, descriptors_1, descriptors_2 );
             cout << "There are total: " << matches.size() << "sets of pairs" << endl;
+            match_descriptor_all_current_reconstruct( pointcloud_all, keypoints_1, keypoints_2, descriptors_2, depth_prev, matches, 
+                                                      descriptors_all, cameraMatrix, quaternion_global, translation_global );
 
             
             quaternion_global.push_back(q_eigen);
@@ -189,6 +213,8 @@ int main ( int argc, char** argv )
             // reset
             keypoints_1.clear(); 
             keypoints_2.clear();
+            descriptors_1.release();
+            descriptors_2.release();
             matches.clear();
 
             k++; 
@@ -217,6 +243,8 @@ Eigen::Quaterniond Rotation2quaternion( const Mat& R )
 
 void initialization_Rt( vector<KeyPoint> keypoints_1,
                         vector<KeyPoint> keypoints_2,
+                        Mat& descriptors_1,
+                        Mat& descriptors_2,
                         const Mat& depth_1,
                         vector<Eigen::Quaterniond>& qua_global,
                         vector<Eigen::Vector3d>& tran_global,
@@ -229,6 +257,7 @@ void initialization_Rt( vector<KeyPoint> keypoints_1,
     Mat r ,t, R;
     Eigen::Quaterniond q_eigen;
     Eigen::Vector3d t_eigen;
+    Mat des1_nice, des2_nice;
 
     cout << "Initialization of the rotation, translation and pointcloud for first match" << endl << endl;
 
@@ -237,6 +266,9 @@ void initialization_Rt( vector<KeyPoint> keypoints_1,
         ushort d = depth_1.ptr<unsigned short> (int ( keypoints_1[m.queryIdx].pt.y )) [ int ( keypoints_1[m.queryIdx].pt.x ) ];
         if ( d == 0 )   // bad depth
             continue;
+        // store good descriptors, which correspond to non-zero depth
+        des1_nice.push_back( descriptors_1.row(m.queryIdx) );  
+        des2_nice.push_back( descriptors_2.row(m.trainIdx) );   
         double dd = d/5000.0;
         Point2d p1 = pixel2cam ( keypoints_1[m.queryIdx].pt, cameraMatrix );
         // transform point cloud from current frame to global frame
@@ -244,8 +276,8 @@ void initialization_Rt( vector<KeyPoint> keypoints_1,
         // x1 = R(Transpose)*(x2-t), x1 are the pointcloud in frame 1; x2 are pointcloud in frame 2
         Eigen::Vector3d pts_3d_proj;
         pts_3d_proj << p1.x*dd-tran_global[0](0,0), 
-                        p1.y*dd-tran_global[0](1,0),
-                        dd-tran_global[0](2,0) ;
+                       p1.y*dd-tran_global[0](1,0),
+                       dd-tran_global[0](2,0) ;
         //cout << "pts_3d_tran = " << pts_3d_tran << endl;
         pts_3d_proj = qua_global[0].toRotationMatrix().transpose() * pts_3d_proj;
         //pts_3d.push_back ( Point3d ( p1.x*dd, p1.y*dd, dd ) );
@@ -253,8 +285,13 @@ void initialization_Rt( vector<KeyPoint> keypoints_1,
         pts_2d.push_back ( keypoints_2[m.trainIdx].pt );
     }
 
+    descriptors_1 = des1_nice.clone();
+    descriptors_2 = des2_nice.clone();
+    
     cout << "pts_3d: " << pts_3d.size() << endl;
     cout << "pts_2d: " << pts_2d.size() << endl;
+    cout << "descriptors_1 size: " << descriptors_1.size() << endl;
+    cout << "descriptors_2 size: " << descriptors_2.size() << endl;
 
     solvePnPRansac( pts_3d, pts_2d, cameraMatrix, Mat(), r, t, false ); // 调用OpenCV 的 PnP 求解，可选择EPNP，DLS等方法
     cout << "calling bundle adjustment using Ceres Solver" << endl;
@@ -272,6 +309,151 @@ void initialization_Rt( vector<KeyPoint> keypoints_1,
     pointcloud_all.push_back(pts_3d);
     qua_global.push_back(q_eigen);
     tran_global.push_back(t_eigen);
+}
+
+
+void match_descriptor_all_current_reconstruct(  vector< vector<Point3d> >& pointcloud_all,
+                                                vector<KeyPoint>& keypoints_1,
+                                                vector<KeyPoint>& keypoints_2,
+                                                Mat& descriptors_2,
+                                                Mat depth_prev,
+                                                vector<DMatch> matches_prev_curr,
+                                                vector<Mat>& descriptors_all,
+                                                Mat& cameraMatrix,
+                                                vector<Eigen::Quaterniond>& qua_global,
+                                                vector<Eigen::Vector3d>& tran_global  )
+{
+    int des_num, point_num;
+    Mat Descriptors;
+    vector<DMatch> matches;
+    vector<Point3d> Pointcloud;
+
+    Ptr<DescriptorMatcher> matcher  = DescriptorMatcher::create ( "BruteForce-Hamming" );
+    des_num = descriptors_all.size();
+    point_num = pointcloud_all.size();
+
+    for(int i=0; i<des_num; i++)
+        Descriptors.push_back( descriptors_all[i] );
+    for(int j=0; j<point_num; j++)
+        Pointcloud.insert( Pointcloud.end(), pointcloud_all[j].begin(), pointcloud_all[j].end() );
+        
+    
+    cout << "Descriptors size: " << Descriptors.size() << endl;
+    cout << "descriptors_2 size: " << descriptors_2.size() << endl;
+
+    //cout << "Descriptors: \n" << Descriptors << endl;
+    //cout << "descriptors_2: \n" << descriptors_2 << endl;
+   
+
+    vector<DMatch> match_all_2;
+    // BFMatcher matcher ( NORM_HAMMING );
+    matcher->match ( Descriptors, descriptors_2, match_all_2 );
+
+    double min_dist=10000, max_dist=0;
+
+    for( int i = 0; i < match_all_2.size(); i++ )
+    {
+        double dist = match_all_2[i].distance;
+        if ( dist < min_dist ) min_dist = dist;
+        if ( dist > max_dist ) max_dist = dist;
+    }
+
+    for( int i = 0; i < match_all_2.size(); i++ )
+    {
+        if( match_all_2[i].distance <= max ( 2*min_dist, 25.0 ) )
+        {
+            matches.push_back ( match_all_2[i] );
+            //cout << "queryIdx = " << match[i].queryIdx << endl;
+            //cout << "trainIdx = " << match[i].trainIdx << endl << endl;
+        }
+    }
+
+    cout << "matches size: " << matches.size() << endl;
+    // find the corresponing 3D pointcloud and 2D image point
+    vector<Point3d> pts_3d_matched;
+    vector<Point3d> pts_3d_not_matched;
+    vector<Point2d> pts_2d_matched;
+    vector<Point2d> pts_2d_not_matched;
+    Mat des2_nice;
+
+    for( DMatch m:matches )
+    {
+        pts_3d_matched.push_back ( Pointcloud[m.queryIdx] );
+        pts_2d_matched.push_back ( keypoints_2[m.trainIdx].pt );
+    }
+
+    cout << "pts_3d_matched: " << pts_3d_matched.size() << endl;
+    cout << "pts_2d_matched: " << pts_2d_matched.size() << endl;
+
+    // find the un-corresponding 3D pointclud from depth_prev
+    for( DMatch M:matches_prev_curr ){
+        
+        ushort d = depth_prev.ptr<unsigned short> (int ( keypoints_1[M.queryIdx].pt.y )) [ int ( keypoints_1[M.queryIdx].pt.x ) ];
+        if ( d == 0 )   // bad depth, which cause solvePnP fails
+            continue;
+        
+        des2_nice.push_back( descriptors_2.row( M.trainIdx ) );
+        pts_2d_not_matched.push_back( keypoints_2[M.trainIdx].pt );
+        // x , y, z coor
+        double dd = d/5000.0;
+        Point2d p1 = pixel2cam ( keypoints_1[M.queryIdx].pt, cameraMatrix );
+        // store 3D point in camera frame not in global frame
+        pts_3d_not_matched.push_back ( Point3d ( p1.x*dd, p1.y*dd, dd ) );   
+
+        for( DMatch m:matches ){
+            if( M.trainIdx == m.trainIdx ){
+                pts_3d_not_matched.pop_back();
+                des2_nice.pop_back();
+                pts_2d_not_matched.pop_back();                
+                break;
+            }
+        }
+    }
+
+    cout << "pts_3d_not_matched size: " << pts_3d_not_matched.size() << endl;
+    cout << "des2_nice size: " << des2_nice.size() << endl;
+
+    // using solvePnP to find rotation and translation of the current frame
+    Mat r ,t, R;
+    Eigen::Quaterniond q_eigen;
+    Eigen::Vector3d t_eigen;
+
+    solvePnPRansac( pts_3d_matched, pts_2d_matched, cameraMatrix, Mat(), r, t, false ); 
+    cv::Rodrigues( r, R ); // r为旋转向量形式，用Rodrigues公式转换为矩阵
+ 
+    // transform the pts_3d_not_matched to global frame
+    // from x2 = R*x1+t
+    // x1 = R(Transpose)*(x2-t), x1 are the pointcloud in frame 1; x2 are pointcloud in frame 2
+
+    for(int i=0; i<pts_3d_not_matched.size(); i++){
+        double x, y, z;
+
+        x = pts_3d_not_matched[i].x - t.at<double>(0,0);
+        y = pts_3d_not_matched[i].y - t.at<double>(1,0);
+        z = pts_3d_not_matched[i].z - t.at<double>(2,0);
+        Mat x2 = ( Mat_<double> ( 3,1 ) << x, y, z);
+        Mat x1;
+        x1 = R.t()*x2;
+        pts_3d_not_matched[i].x = x1.at<double>(0,0);
+        pts_3d_not_matched[i].y = x1.at<double>(1,0);
+        pts_3d_not_matched[i].z = x1.at<double>(2,0);
+    }
+
+    bundle_adjustment( r, t, pts_2d_not_matched, pts_3d_not_matched );
+
+    t_eigen << t.at<double>(0,0), t.at<double>(1,0), t.at<double>(2,0);
+
+    cout << "R=\n" << R <<endl;
+    cout << "r =\n" << endl << r << endl;
+    cout << "t=\n" << endl << t << endl;
+    q_eigen = Rotation2quaternion( R );
+    cout << "q = \n" << q_eigen.vec().transpose() << " " << q_eigen.w() << endl;
+    
+    pointcloud_all.push_back( pts_3d_not_matched );
+    descriptors_all.push_back( des2_nice );
+    qua_global.push_back( q_eigen );
+    tran_global.push_back( t_eigen );
+
 }
 
 
@@ -330,7 +512,6 @@ void find_feature_matches ( const Mat& img_1, const Mat& img_2,
                             Mat& descriptors_1,
                             Mat& descriptors_2 )
 {
-
     Ptr<FeatureDetector> detector = ORB::create();
     Ptr<DescriptorExtractor> descriptor = ORB::create();
     Ptr<DescriptorMatcher> matcher  = DescriptorMatcher::create ( "BruteForce-Hamming" );
@@ -351,7 +532,7 @@ void find_feature_matches ( const Mat& img_1, const Mat& img_2,
     double min_dist=10000, max_dist=0;
 
     //找出所有匹配之间的最小距离和最大距离, 即是最相似的和最不相似的两组点之间的距离
-    for ( int i = 0; i < descriptors_1.rows; i++ )
+    for( int i = 0; i < descriptors_1.rows; i++ )
     {
         double dist = match[i].distance;
         if ( dist < min_dist ) min_dist = dist;
@@ -359,15 +540,16 @@ void find_feature_matches ( const Mat& img_1, const Mat& img_2,
     }
 
     //当描述子之间的距离大于两倍的最小距离时,即认为匹配有误.但有时候最小距离会非常小,设置一个经验值30作为下限.
-    for ( int i = 0; i < descriptors_1.rows; i++ )
+    for( int i = 0; i < descriptors_1.rows; i++ )
     {
-        if ( match[i].distance <= max ( 2*min_dist, 25.0 ) )
+        if( match[i].distance <= max ( 2*min_dist, 25.0 ) )
         {
             matches.push_back ( match[i] );
             //cout << "queryIdx = " << match[i].queryIdx << endl;
             //cout << "trainIdx = " << match[i].trainIdx << endl << endl;
         }
     }
+
 }
 
 
