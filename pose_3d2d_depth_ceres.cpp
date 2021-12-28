@@ -117,7 +117,7 @@ int main ( int argc, char** argv )
 
     // 0.4183 -0.4920 1.6849 -0.8156 0.0346 -0.0049 0.5775 (tx,ty,tz,qx,qy,qz,qw)
     // initialization of translation and rotation from groundtruth.txt
-    Eigen::Quaterniond q_eigen( 0.5775, -0.8156, 0.0346, -0.0049 );
+    Eigen::Quaterniond q_eigen( -0.3594, 0.8596, -0.3534, 0.0838 );
     Eigen::Matrix3d R_eigen = q_eigen.toRotationMatrix();
     // store global translation and rotation array
     vector<Eigen::Quaterniond> quaternion_global;
@@ -125,7 +125,7 @@ int main ( int argc, char** argv )
 
     quaternion_global.push_back(q_eigen);
     Mat r;
-    Mat t = ( Mat_<double> ( 3,1 ) << 0.4183, -0.4920, 1.6849 );
+    Mat t = ( Mat_<double> ( 3,1 ) << 0.4388, -0.4332, 1.4779 );
     Mat R = ( Mat_<double> ( 3,3 ) << R_eigen(0,0), R_eigen(0,1), R_eigen(0,2),
                                       R_eigen(1,0), R_eigen(1,1), R_eigen(1,2),
                                       R_eigen(2,0), R_eigen(2,1), R_eigen(2,2) );
@@ -187,7 +187,7 @@ int main ( int argc, char** argv )
     while( !fin.eof() ){
 
         // for debug
-        if(k == 50)
+        if(k == 20)
             break;
         cout << "*********** loop " << k << " ************" << endl << endl;
         fin >> time_rgb >> rgb_file >> time_depth >> depth_file;
@@ -385,6 +385,14 @@ void match_descriptor_all_current_reconstruct(  vector< vector<Point3d> >& point
     cout << "pts_3d_matched: " << pts_3d_matched.size() << endl;
     cout << "pts_2d_matched: " << pts_2d_matched.size() << endl;
 
+    // using solvePnP to find rotation and translation of the current frame
+    Mat r ,t, R;
+    Eigen::Quaterniond q_eigen;
+    Eigen::Vector3d t_eigen;
+
+    solvePnPRansac( pts_3d_matched, pts_2d_matched, cameraMatrix, Mat(), r, t, false ); 
+    cv::Rodrigues( r, R ); // r为旋转向量形式，用Rodrigues公式转换为矩阵
+
     // find the un-corresponding 3D pointclud from depth_prev
     for( DMatch M:matches_prev_curr ){
         
@@ -413,13 +421,6 @@ void match_descriptor_all_current_reconstruct(  vector< vector<Point3d> >& point
     cout << "pts_3d_not_matched size: " << pts_3d_not_matched.size() << endl;
     cout << "des2_nice size: " << des2_nice.size() << endl;
 
-    // using solvePnP to find rotation and translation of the current frame
-    Mat r ,t, R;
-    Eigen::Quaterniond q_eigen;
-    Eigen::Vector3d t_eigen;
-
-    solvePnPRansac( pts_3d_matched, pts_2d_matched, cameraMatrix, Mat(), r, t, false ); 
-    cv::Rodrigues( r, R ); // r为旋转向量形式，用Rodrigues公式转换为矩阵
  
     // transform the pts_3d_not_matched to global frame
     // from x2 = R*x1+t
@@ -472,7 +473,7 @@ void bundle_adjustment( Mat& r, Mat& t, std::vector<Point2d>& pts_2d, std::vecto
     ceres::Problem problem;
     for(int i=0; i<pts_3d.size(); i++){
         ceres::CostFunction* costfunction = new ceres::AutoDiffCostFunction<cost_function_define,2,3,3,3>(new cost_function_define(pts_2d[i]));
-        problem.AddResidualBlock(costfunction, new ceres::HuberLoss(4), cere_rot, cere_tran, &(pts_3d[i].x)); //注意，cere_rot不能为Mat类型      
+        problem.AddResidualBlock(costfunction, new ceres::CauchyLoss(0.5), cere_rot, cere_tran, &(pts_3d[i].x)); //注意，cere_rot不能为Mat类型      
     }
 
     ceres::Solver::Options option;
